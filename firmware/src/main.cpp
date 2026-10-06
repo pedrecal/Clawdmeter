@@ -117,6 +117,10 @@ static bool parse_json(const char* json, UsageData* out) {
     out->time_pct = doc["tp"] | 0;
     out->period_days = doc["pd"] | 30;
     strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
+    out->has_scoped = !doc["f"].isNull();
+    out->scoped_pct = doc["f"] | 0.0f;
+    out->scoped_reset_mins = doc["fr"] | -1;
+    strlcpy(out->scoped_name, doc["fn"] | "Model", sizeof(out->scoped_name));
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
     out->ok = doc["ok"] | false;

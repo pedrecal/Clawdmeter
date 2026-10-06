@@ -1,4 +1,6 @@
 #include "sim_platform.h"
+#include "../../ui.h"
+#include <string.h>
 #include <SDL.h>
 #include <Arduino.h>
 #include <stdlib.h>
@@ -59,6 +61,15 @@ void sim_pump(void) {
     if (pwr_down && !pwr_long_fired && millis() - pwr_down_ms >= PWR_LONG_MS) {
         pwr_long_fired = true;
         edge_long = true;
+    }
+
+    // Headless hook: SIM_START_SCREEN=usage → skip the splash once at boot so
+    // autoshots capture the usage view (the splash is the default screen).
+    static bool start_screen_done = false;
+    if (!start_screen_done && millis() >= 500) {
+        start_screen_done = true;
+        const char* ss = getenv("SIM_START_SCREEN");
+        if (ss && strcmp(ss, "usage") == 0) ui_show_screen(SCREEN_USAGE);
     }
 
     // Headless CI hook: SIM_AUTOSHOT_MS=<ms> → screenshot + exit.

@@ -26,5 +26,10 @@
 // exits.
 
 #define BOARD_NAME  "Simulator 480x480"
+// Overridable from platformio.ini (e.g. the sim_349 env builds 640×172).
+#ifndef LCD_WIDTH
 #define LCD_WIDTH   480
+#endif
+#ifndef LCD_HEIGHT
 #define LCD_HEIGHT  480
+#endif

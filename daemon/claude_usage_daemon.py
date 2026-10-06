@@ -41,6 +41,10 @@ SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-addres
 CONFIG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "config"
 
 API_URL = "https://api.anthropic.com/v1/messages"
+# Subscription usage endpoint (what Claude Code's /usage reads). Exposes the
+# per-model weekly bucket ("weekly_scoped", e.g. Fable) that the rate-limit
+# headers never carry.
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "oauth-2025-04-20",
@@ -404,12 +408,37 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
+async def fetch_scoped_weekly(http: "httpx.AsyncClient", headers: dict) -> dict:
+    """Return {"f": pct, "fr": reset_minutes, "fn": name} for the per-model
+    weekly bucket from /api/oauth/usage, or {} when absent or on any error.
+    Best-effort: never lets a failure here break the main payload."""
+    try:
+        resp = await http.get(USAGE_URL, headers=headers)
+        if resp.status_code != 200:
+            return {}
+        for lim in resp.json().get("limits") or []:
+            if lim.get("kind") != "weekly_scoped":
+                continue
+            name = (((lim.get("scope") or {}).get("model") or {}).get("display_name")) or "Model"
+            resets_at = lim.get("resets_at")
+            mins = 0
+            if resets_at:
+                dt = datetime.datetime.fromisoformat(resets_at)
+                mins = int(round((dt.timestamp() - time.time()) / 60.0))
+                mins = mins if mins > 0 else 0
+            return {"f": int(round(float(lim.get("percent") or 0))), "fr": mins, "fn": name[:11]}
+    except Exception as e:  # noqa: BLE001 — best-effort enrichment
+        log(f"scoped usage fetch failed: {e}")
+    return {}
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
     try:
         async with httpx.AsyncClient(timeout=20.0) as http:
             resp = await http.post(API_URL, headers=headers, json=API_BODY)
+            scoped = await fetch_scoped_weekly(http, headers)
     except httpx.HTTPError as e:
         log(f"API call failed: {e}")
         return None
@@ -450,6 +479,7 @@ async def poll_api(token: str) -> dict | None:
             "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
             "acct": "pro",
             "ok": True,
+            **scoped,   # "f"/"fr"/"fn": per-model weekly bucket, when the plan has one
         }
     else:
         reset_ts = hdr("anthropic-ratelimit-unified-overage-reset")

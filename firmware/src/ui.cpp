@@ -38,6 +38,15 @@ struct Layout {
     int16_t usage_reset_y;
     int16_t bar_h;
     int16_t panel_pad_x, panel_pad_y;
+
+    // Strip layout (very wide panels, e.g. 640x172): the two usage panels
+    // become full-width rows — pill | big % | bar | reset — and the title
+    // (clock), status line, mascot and battery share a thin footer.
+    bool    strip;
+    int16_t row_pct_x;        // big % label x inside the row
+    int16_t row_bar_x;        // bar x inside the row
+    int16_t row_reset_w;      // right-aligned reset label width
+    int16_t footer_y;         // footer top edge
     int16_t pill_pad_x, pill_pad_y;
     const lv_font_t* title_font;     // screen title / clock
     const lv_font_t* pct_font;       // big percentage number
@@ -175,6 +184,44 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_credit_2_font = &font_styrene_12;
     }
 
+    // Strip override — aspect ratio >= 2:1 (the 3.49" 640x172). Rows instead
+    // of stacked panels; everything else moves into a footer.
+    L.strip = (c.width >= 2 * c.height);
+    if (L.strip) {
+        // Three rows (session, weekly, per-model weekly) + a thin footer.
+        L.margin = 10;
+        L.content_y = 6;
+        L.usage_panel_h = 42;        // row height
+        L.usage_panel_gap = 5;
+        L.bar_h = 16;
+        L.panel_pad_x = 10;
+        L.panel_pad_y = 4;
+        L.pill_pad_x = 7;
+        L.pill_pad_y = 1;
+        L.row_pct_x = 82;
+        L.row_bar_x = 158;
+        L.row_reset_w = 150;      // "Resets in 5d 11h" on one line in styrene_14
+        L.usage_reset_y = 18;        // enterprise overlays live under the pill
+        L.footer_y = L.content_y + 3 * L.usage_panel_h + 2 * L.usage_panel_gap + 2;
+        L.title_font   = &font_styrene_14;   // clock in the footer
+        L.pct_font     = &font_styrene_24;
+        L.ent_pct_font = &font_styrene_24;
+        L.pill_font    = &font_styrene_12;
+        L.reset_font   = &font_styrene_14;
+        L.pace_font    = &font_styrene_12;
+        L.anim_font    = &font_mono_18;
+        L.anim_y = -4;
+        L.small_icons = true;
+        L.title_nudge = 0;
+        L.logo_y = L.footer_y - 6;
+        L.batt_y = L.footer_y + 4;
+        L.batt_w = ICON_BATTERY_SMALL_W;
+        L.pair_y1 = 14;
+        L.pair_y2 = 66;
+        L.pair_y3 = 100;
+        L.idle_px = 96;
+    }
+
     L.content_w = L.scr_w - 2 * L.margin;
 }
 
@@ -211,6 +258,12 @@ static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 static lv_obj_t* panel_session = nullptr;
 static lv_obj_t* panel_weekly = nullptr;
+// Per-model weekly row (strip layout only; hidden until the daemon sends "f")
+static lv_obj_t* panel_scoped = nullptr;
+static lv_obj_t* bar_scoped = nullptr;
+static lv_obj_t* lbl_scoped_pct = nullptr;
+static lv_obj_t* lbl_scoped_label = nullptr;
+static lv_obj_t* lbl_scoped_reset = nullptr;
 // Enterprise-only widgets inside panel_session
 static lv_obj_t* lbl_session_pct_sym = nullptr;  // "%" in smaller font
 static lv_obj_t* lbl_spending_desc = nullptr;     // "of your monthly budget"
@@ -414,6 +467,38 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     return panel;
 }
 
+// Strip variant of make_usage_panel: one full-width row.
+//   [pill]  42%  [=========bar=========]   Resets in 3h 0m
+static lv_obj_t* make_usage_row(lv_obj_t* parent, int y, const char* pill_text,
+                                lv_obj_t** out_pct, lv_obj_t** out_pill,
+                                lv_obj_t** out_bar, lv_obj_t** out_reset) {
+    lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
+    const int inner_w = L.content_w - 2 * L.panel_pad_x;
+    const int inner_h = L.usage_panel_h - 2 * L.panel_pad_y;
+
+    *out_pill = make_pill(panel, pill_text);
+    lv_obj_align(*out_pill, LV_ALIGN_LEFT_MID, 0, 0);
+
+    *out_pct = lv_label_create(panel);
+    lv_label_set_text(*out_pct, "---%");
+    lv_obj_set_style_text_font(*out_pct, L.pct_font, 0);
+    lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
+    lv_obj_align(*out_pct, LV_ALIGN_LEFT_MID, L.row_pct_x, 0);
+
+    const int bar_w = inner_w - L.row_bar_x - L.row_reset_w - 14;
+    *out_bar = make_bar(panel, L.row_bar_x, (inner_h - L.bar_h) / 2, bar_w, L.bar_h);
+
+    *out_reset = lv_label_create(panel);
+    lv_label_set_text(*out_reset, "---");
+    lv_obj_set_style_text_font(*out_reset, L.reset_font, 0);
+    lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
+    lv_obj_set_width(*out_reset, L.row_reset_w);
+    lv_obj_set_style_text_align(*out_reset, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(*out_reset, LV_ALIGN_RIGHT_MID, 0, 0);
+
+    return panel;
+}
+
 // Pairing hint — shown when disconnected so the screen isn't empty and the
 // user knows how to (re)pair. Wording matches the 3-second release gesture.
 static void build_pair_group(lv_obj_t* parent) {
@@ -485,7 +570,14 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     // The nudge balances the corner logo on the left; smaller on small
     // screens where the logo is 40px and the battery icon sits closer.
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, L.title_nudge, L.title_y);
+    if (L.strip) {
+        // Footer, right side, just before the battery icon.
+        lv_obj_set_style_text_color(lbl_title, COL_DIM, 0);
+        lv_obj_align(lbl_title, LV_ALIGN_BOTTOM_RIGHT,
+                     -(L.margin + L.batt_w + 10), L.anim_y);
+    } else {
+        lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, L.title_nudge, L.title_y);
+    }
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -498,9 +590,13 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
-                     &lbl_session_pct, &lbl_session_label,
-                     &bar_session, &lbl_session_reset);
+    panel_session = L.strip
+        ? make_usage_row(usage_group, L.content_y, "Current",
+                         &lbl_session_pct, &lbl_session_label,
+                         &bar_session, &lbl_session_reset)
+        : make_usage_panel(usage_group, L.content_y, "Current",
+                           &lbl_session_pct, &lbl_session_label,
+                           &bar_session, &lbl_session_reset);
 
     // Enterprise-only overlays inside panel_session — hidden until enterprise data arrives
     lbl_session_pct_sym = lv_label_create(panel_session);
@@ -522,12 +618,25 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
-    panel_weekly = make_usage_panel(usage_group,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
-                     &lbl_weekly_pct, &lbl_weekly_label,
-                     &bar_weekly, &lbl_weekly_reset);
+    panel_weekly = L.strip
+        ? make_usage_row(usage_group,
+                         L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+                         &lbl_weekly_pct, &lbl_weekly_label,
+                         &bar_weekly, &lbl_weekly_reset)
+        : make_usage_panel(usage_group,
+                           L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+                           &lbl_weekly_pct, &lbl_weekly_label,
+                           &bar_weekly, &lbl_weekly_reset);
     // Recolor enabled so enterprise period box can color pace and reset separately
     lv_label_set_recolor(lbl_weekly_reset, true);
+
+    if (L.strip) {
+        panel_scoped = make_usage_row(usage_group,
+                         L.content_y + 2 * (L.usage_panel_h + L.usage_panel_gap), "Model",
+                         &lbl_scoped_pct, &lbl_scoped_label,
+                         &bar_scoped, &lbl_scoped_reset);
+        lv_obj_add_flag(panel_scoped, LV_OBJ_FLAG_HIDDEN);   // until "f" arrives
+    }
 
     build_pair_group(usage_container);
     build_idle_group(usage_container);
@@ -537,7 +646,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, L.anim_font, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
+    if (L.strip) lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_LEFT, L.margin + 44, L.anim_y);
+    else         lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, L.anim_y);
 }
 
 // ======== Public API ========
@@ -672,6 +782,22 @@ void ui_update(const UsageData* data) {
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
         format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
+    }
+
+    // Per-model weekly bucket (e.g. Fable) — strip layout only.
+    if (panel_scoped) {
+        if (data->has_scoped && !data->enterprise) {
+            int f_pct = (int)(data->scoped_pct + 0.5f);
+            lv_label_set_text(lbl_scoped_label, data->scoped_name);
+            lv_label_set_text_fmt(lbl_scoped_pct, "%d%%", f_pct);
+            lv_bar_set_value(bar_scoped, f_pct, LV_ANIM_ON);
+            lv_obj_set_style_bg_color(bar_scoped, pct_color(data->scoped_pct), LV_PART_INDICATOR);
+            format_reset_time(data->scoped_reset_mins, buf, sizeof(buf));
+            lv_label_set_text(lbl_scoped_reset, buf);
+            lv_obj_clear_flag(panel_scoped, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(panel_scoped, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
